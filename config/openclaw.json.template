@@ -132,7 +132,7 @@
   },
   "channels": {
     "discord": {
-      "groupPolicy": "allowlist",
+      "groupPolicy": "open",
       "dmPolicy": "allowlist",
       "allowFrom": ["${OPENCLAW_ADMIN_DISCORD_ID}"]
     },
