@@ -1,0 +1,1029 @@
+#!/bin/bash
+# brain-core orchestration script — see docs/orchestration-scripts.md
+# task-manager.sh — Task lifecycle state management for the orchestrator
+#
+# Manages task state via a JSON file. This is the orchestrator's persistent memory —
+# it tracks what tasks exist, what phase they're in, and their metadata.
+#
+# Usage:
+#   task-manager.sh create <task-id> <repo> <description> [--base-branch <branch>] [--requested-by <user>]
+#   task-manager.sh status <task-id> <new-status>
+#   task-manager.sh update <task-id> <field> <value>
+#   task-manager.sh get <task-id>
+#   task-manager.sh list [--status <status>] [--active]
+#   task-manager.sh delete <task-id>
+#   task-manager.sh set-tokens <task-id> <input> <output> [cost-usd]
+#   task-manager.sh dequeue              — promote oldest queued task to "created" if capacity available
+#   task-manager.sh queue-status         — show active/queued counts and capacity
+#
+# Output (stdout): JSON
+# Logging (stderr): progress/errors
+#
+# Exit codes:
+#   0 — Success
+#   1 — Invalid arguments or usage error
+#   2 — Task not found
+#   3 — Invalid status transition
+#   4 — State file I/O error
+
+set -euo pipefail
+
+# --- Constants ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="${WORKSPACE:-$(pwd)}"
+STATE_DIR="${WORKSPACE}/state"
+STATE_FILE="${STATE_DIR}/tasks.json"
+WORKSPACES_ROOT="${WORKSPACES_ROOT:-/opt/opencode}"
+
+MAX_CONCURRENT_TASKS="${MAX_CONCURRENT_TASKS:-3}"
+
+VALID_STATUSES="queued created planning plan_review approved blocked executing validating qa code_review completed failed aborted timed_out paused"
+TERMINAL_STATUSES="completed failed aborted timed_out"
+ACTIVE_STATUSES="created planning plan_review approved blocked executing validating qa code_review paused"
+
+# Valid state transitions (from:to pairs)
+# Format: "from_status:to_status" - if not listed, transition is blocked
+declare -A VALID_TRANSITIONS=(
+  # Queue flow
+  ["queued:created"]=1
+  ["queued:aborted"]=1
+  # Initial flow
+  ["created:planning"]=1
+  ["planning:plan_review"]=1
+  ["planning:failed"]=1
+  ["plan_review:approved"]=1
+  ["plan_review:planning"]=1  # Revision cycle
+  ["approved:executing"]=1
+  ["approved:plan_review"]=1  # Approval revocation
+  ["approved:failed"]=1       # Infrastructure failure after approval
+  ["executing:validating"]=1
+  ["executing:failed"]=1
+  ["executing:paused"]=1
+  ["validating:code_review"]=1
+  ["validating:executing"]=1  # Retry on validation failure
+  ["validating:failed"]=1
+  ["code_review:qa"]=1
+  ["qa:executing"]=1  # QA rejection, send back for fixes
+  ["qa:completed"]=1
+  ["code_review:executing"]=1  # Changes requested
+  ["code_review:failed"]=1
+  ["qa:failed"]=1
+  # Blocked state exits (can be unblocked to any active state)
+  ["blocked:planning"]=1
+  ["blocked:plan_review"]=1
+  ["blocked:approved"]=1
+  ["blocked:executing"]=1
+  ["blocked:validating"]=1
+  ["blocked:code_review"]=1
+  # Any active state can be blocked
+  ["planning:blocked"]=1
+  ["plan_review:blocked"]=1
+  ["approved:blocked"]=1
+  ["executing:blocked"]=1
+  ["validating:blocked"]=1
+  ["qa:blocked"]=1
+  ["code_review:blocked"]=1
+  ["blocked:qa"]=1
+  # Pause/resume
+  ["paused:executing"]=1
+  ["paused:planning"]=1
+  # Terminal transitions (any non-terminal can fail/abort/timeout)
+  ["created:aborted"]=1
+  ["planning:aborted"]=1
+  ["plan_review:aborted"]=1
+  ["approved:aborted"]=1
+  ["executing:aborted"]=1
+  ["validating:aborted"]=1
+  ["qa:aborted"]=1
+  ["code_review:aborted"]=1
+  ["blocked:aborted"]=1
+  ["paused:aborted"]=1
+  ["planning:timed_out"]=1
+  ["executing:timed_out"]=1
+  ["paused:timed_out"]=1
+)
+
+# --- Logging (all to stderr) ---
+log() {
+  echo "[task-mgr] $*" >&2
+}
+
+# --- Task ID validation (same regex as setup-workspace.sh) ---
+validate_task_id() {
+  local task_id="$1"
+  # Strict format: task-{10-13 digit timestamp}-{4-8 hex chars}
+  # This prevents path traversal and ensures consistent ID format
+  if ! [[ "$task_id" =~ ^task-[0-9]{10,13}-[a-f0-9]{4,8}$ ]]; then
+    log "ERROR: Invalid task-id '$task_id' — must match format: task-{timestamp}-{hex} (e.g., task-1738600000-a1b2c3d4)"
+    exit 1
+  fi
+}
+
+# --- Ensure state file exists ---
+ensure_state_file() {
+  if [ ! -d "$STATE_DIR" ]; then
+    mkdir -p "$STATE_DIR"
+    log "Created state directory: $STATE_DIR"
+  fi
+
+  if [ ! -f "$STATE_FILE" ]; then
+    echo '{"tasks": {}, "queue": [], "version": 2}' > "$STATE_FILE"
+    log "Created state file: $STATE_FILE"
+  fi
+}
+
+# --- Subcommands ---
+
+cmd_create() {
+  if [ $# -lt 3 ]; then
+    log "Usage: task-manager.sh create <task-id> <repo> <description> [--base-branch <branch>] [--requested-by <user>]"
+    exit 1
+  fi
+
+  local task_id="$1"
+  local repo="$2"
+  local description="$3"
+  shift 3
+
+  validate_task_id "$task_id"
+
+  if ! [[ "$repo" =~ ^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$ ]]; then
+    log "ERROR: Invalid repo format '$repo' — expected 'owner/repo'"
+    exit 1
+  fi
+
+  ensure_state_file
+
+  # Parse optional flags
+  local base_branch="main"
+  local requested_by="your-agent"
+  local auto_approve="false"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base-branch)
+        if [ $# -lt 2 ]; then
+          log "ERROR: --base-branch requires a value"
+          exit 1
+        fi
+        base_branch="$2"
+        shift 2
+        ;;
+      --requested-by)
+        if [ $# -lt 2 ]; then
+          log "ERROR: --requested-by requires a value"
+          exit 1
+        fi
+        requested_by="$2"
+        shift 2
+        ;;
+      --auto-approve)
+        # Only human can set this at creation time
+        auto_approve="true"
+        shift
+        ;;
+      *)
+        log "ERROR: Unknown flag '$1'"
+        exit 1
+        ;;
+    esac
+  done
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys, os
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+repo = sys.argv[3]
+description = sys.argv[4]
+base_branch = sys.argv[5]
+workspaces_root = sys.argv[6]
+requested_by = sys.argv[7]
+auto_approve = sys.argv[8].lower() == 'true'
+max_concurrent = int(sys.argv[9])
+active_statuses = set(sys.argv[10].split())
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+if task_id in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} already exists'}))
+    sys.exit(1)
+
+now = datetime.now(timezone.utc).isoformat()
+
+if '/' in repo:
+    repo_url = f'https://github.com/{repo}'
+else:
+    repo_url = ''
+
+state.setdefault('queue', [])
+
+active_count = sum(
+    1 for t in state.get('tasks', {}).values()
+    if t.get('status') in active_statuses
+)
+
+initial_status = 'created'
+if active_count >= max_concurrent:
+    initial_status = 'queued'
+    state['queue'].append(task_id)
+
+task = {
+    'id': task_id,
+    'status': initial_status,
+    'repo': repo,
+    'repo_url': repo_url,
+    'branch': f'agent/{task_id}',
+    'base_branch': base_branch,
+    'workspace': f'{workspaces_root}/{task_id}',
+    'session_id': None,
+    'description': description,
+    'pr_number': None,
+    'pr_url': None,
+    'plan_file': None,
+    'agent_state': None,
+    'requested_by': requested_by,
+    'auto_approve': auto_approve,
+    'created_at': now,
+    'updated_at': now,
+    'completed_at': None,
+    'phase_started_at': now,
+    'last_idle_at': None,
+    'nudge_count': 0,
+    'token_usage': {'input': 0, 'output': 0, 'cost_usd': 0.0},
+    'cycle_time_seconds': None,
+    'validation_attempts': 0,
+    'qa_rejection_count': 0,
+    'first_attempt_pass': None,
+    'error': None,
+    'last_output': None,
+    'pre_execution_sha': None,
+}
+
+state['tasks'][task_id] = task
+
+print(json.dumps(task, indent=2))
+
+with open(state_file + '.new', 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\n')
+" "$STATE_FILE" "$task_id" "$repo" "$description" "$base_branch" "$WORKSPACES_ROOT" "$requested_by" "$auto_approve" "$MAX_CONCURRENT_TASKS" "$ACTIVE_STATUSES") || {
+      rm -f "${STATE_FILE}.new"
+      log "ERROR: Failed to create task '$task_id'"
+      exit 1
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    log "Created task: $task_id"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+is_valid_transition() {
+  local from="$1"
+  local to="$2"
+  local key="${from}:${to}"
+  [[ -v VALID_TRANSITIONS["$key"] ]]
+}
+
+cmd_status() {
+  if [ $# -lt 2 ]; then
+    log "Usage: task-manager.sh status <task-id> <new-status> [--force]"
+    exit 1
+  fi
+
+  local task_id="$1"
+  local new_status="$2"
+  local force=false
+  
+  if [ "${3:-}" = "--force" ]; then
+    force=true
+  fi
+
+  validate_task_id "$task_id"
+  ensure_state_file
+
+  local valid=false
+  for s in $VALID_STATUSES; do
+    if [ "$s" = "$new_status" ]; then
+      valid=true
+      break
+    fi
+  done
+  if [ "$valid" = "false" ]; then
+    log "ERROR: Invalid status '$new_status'. Valid statuses: $VALID_STATUSES"
+    exit 3
+  fi
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+new_status = sys.argv[3]
+force = sys.argv[4] == 'true'
+valid_transitions_str = sys.argv[5]
+terminal = {'completed', 'failed', 'aborted', 'timed_out'}
+
+valid_transitions = set(valid_transitions_str.split(',')) if valid_transitions_str else set()
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+if task_id not in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} not found'}), file=sys.stderr)
+    sys.exit(2)
+
+task = state['tasks'][task_id]
+current = task.get('status', '')
+
+if current in terminal:
+    print(f'Cannot transition from terminal status: {current}', file=sys.stderr)
+    sys.exit(3)
+
+transition_key = f'{current}:{new_status}'
+if not force and valid_transitions and transition_key not in valid_transitions:
+    print(f'Invalid transition: {current} -> {new_status}. Use --force to override.', file=sys.stderr)
+    sys.exit(3)
+
+now = datetime.now(timezone.utc).isoformat()
+
+task['status'] = new_status
+task['updated_at'] = now
+task['phase_started_at'] = now
+
+# Track approval timestamp separately for freshness checks
+if new_status == 'approved':
+    task['approved_at'] = now
+
+# Metrics tracking
+if new_status == 'completed':
+    created_str = task['created_at'].replace('Z', '+00:00'); created = datetime.fromisoformat(created_str)
+    completed = datetime.fromisoformat(now.replace('Z', '+00:00'))
+    task['completed_at'] = now
+    task['cycle_time_seconds'] = int((completed - created).total_seconds())
+
+if new_status == 'validating':
+    # Increment validation attempts
+    task['validation_attempts'] = task.get('validation_attempts', 0) + 1
+
+# Track first-attempt pass when transitioning from validating to code_review
+if current == 'validating' and new_status == 'code_review':
+    if task.get('validation_attempts', 0) == 1:
+        task['first_attempt_pass'] = True
+    elif task.get('first_attempt_pass') is None:
+        task['first_attempt_pass'] = False
+
+if new_status == 'qa':
+    task['qa_entered_at'] = now
+if current == 'qa' and new_status == 'completed':
+    task['qa_approved_at'] = now
+if current == 'qa' and new_status == 'executing':
+    task['qa_rejection_count'] = task.get('qa_rejection_count', 0) + 1
+
+print(json.dumps(task, indent=2))
+
+with open(state_file + '.new', 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\n')
+" "$STATE_FILE" "$task_id" "$new_status" "$force" "$(IFS=,; echo "${!VALID_TRANSITIONS[*]}")") || {
+      local py_exit=$?
+      rm -f "${STATE_FILE}.new"
+      exit "$py_exit"
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    log "Updated task $task_id status → $new_status"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+cmd_update() {
+  if [ $# -lt 3 ]; then
+    log "Usage: task-manager.sh update <task-id> <field> <value>"
+    exit 1
+  fi
+
+  local task_id="$1"
+  local field="$2"
+  local value="$3"
+
+  validate_task_id "$task_id"
+  ensure_state_file
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+field = sys.argv[3]
+value = sys.argv[4]
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+if task_id not in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} not found'}), file=sys.stderr)
+    sys.exit(2)
+
+task = state['tasks'][task_id]
+
+immutable = {'id', 'created_at'}
+if field in immutable:
+    print(json.dumps({'error': f'Field {field} is immutable'}), file=sys.stderr)
+    sys.exit(1)
+
+# Security: auto_approve can only be set by human via explicit command, not by agent
+protected = {'auto_approve', 'approved_at'}
+if field in protected:
+    print(json.dumps({'error': f'Field {field} is protected and cannot be modified via update. Use explicit approval commands.'}), file=sys.stderr)
+    sys.exit(1)
+
+if field == 'status':
+    print(json.dumps({'error': 'Use the status subcommand to change task status'}), file=sys.stderr)
+    sys.exit(1)
+
+if field not in task:
+    print(json.dumps({'error': f'Unknown field: {field}'}), file=sys.stderr)
+    sys.exit(1)
+
+existing = task[field]
+if existing is None:
+    try:
+        parsed = json.loads(value)
+        task[field] = parsed
+    except (json.JSONDecodeError, ValueError):
+        task[field] = value
+elif isinstance(existing, bool):
+    task[field] = value.lower() in ('true', '1', 'yes')
+elif isinstance(existing, int):
+    try:
+        task[field] = int(value)
+    except ValueError:
+        print(json.dumps({'error': f'Field {field} expects integer, got: {value}'}), file=sys.stderr)
+        sys.exit(1)
+elif isinstance(existing, float):
+    try:
+        task[field] = float(value)
+    except ValueError:
+        print(json.dumps({'error': f'Field {field} expects float, got: {value}'}), file=sys.stderr)
+        sys.exit(1)
+elif isinstance(existing, dict):
+    try:
+        task[field] = json.loads(value)
+    except json.JSONDecodeError:
+        print(json.dumps({'error': f'Field {field} expects JSON object'}), file=sys.stderr)
+        sys.exit(1)
+elif isinstance(existing, str):
+    task[field] = value
+else:
+    task[field] = value
+
+now = datetime.now(timezone.utc).isoformat()
+task['updated_at'] = now
+
+print(json.dumps(task, indent=2))
+
+with open(state_file + '.new', 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\n')
+" "$STATE_FILE" "$task_id" "$field" "$value") || {
+      rm -f "${STATE_FILE}.new"
+      exit $?
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    local display_value="${value:0:100}"
+    [[ ${#value} -gt 100 ]] && display_value="${display_value}..."
+    log "Updated task $task_id: $field = $display_value"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+cmd_get() {
+  if [ $# -lt 1 ]; then
+    log "Usage: task-manager.sh get <task-id>"
+    exit 1
+  fi
+
+  local task_id="$1"
+  validate_task_id "$task_id"
+  ensure_state_file
+
+  python3 -c "
+import json, sys
+
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+if task_id not in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} not found'}), file=sys.stderr)
+    sys.exit(2)
+
+print(json.dumps(state['tasks'][task_id], indent=2))
+" "$STATE_FILE" "$task_id" || {
+    log "ERROR: Task '$task_id' not found"
+    exit 2
+  }
+}
+
+cmd_list() {
+  ensure_state_file
+
+  local filter_status=""
+  local active_only=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status)
+        if [ $# -lt 2 ]; then
+          log "ERROR: --status requires a value"
+          exit 1
+        fi
+        filter_status="$2"
+        shift 2
+        ;;
+      --active)
+        active_only=true
+        shift
+        ;;
+      *)
+        log "ERROR: Unknown flag '$1'"
+        exit 1
+        ;;
+    esac
+  done
+
+  python3 -c "
+import json, sys
+
+state_file = sys.argv[1]
+filter_status = sys.argv[2]
+active_only = sys.argv[3] == 'true'
+
+terminal = {'completed', 'failed', 'aborted', 'timed_out'}
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+tasks = list(state.get('tasks', {}).values())
+
+if filter_status:
+    tasks = [t for t in tasks if t.get('status') == filter_status]
+
+if active_only:
+    tasks = [t for t in tasks if t.get('status') not in terminal]
+
+print(json.dumps(tasks, indent=2))
+" "$STATE_FILE" "$filter_status" "$active_only"
+}
+
+cmd_delete() {
+  if [ $# -lt 1 ]; then
+    log "Usage: task-manager.sh delete <task-id>"
+    exit 1
+  fi
+
+  local task_id="$1"
+  validate_task_id "$task_id"
+  ensure_state_file
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys
+
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+if task_id not in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} not found'}), file=sys.stderr)
+    sys.exit(2)
+
+deleted = state['tasks'].pop(task_id)
+
+state['queue'] = [q for q in state.get('queue', []) if q != task_id]
+
+print(json.dumps(deleted, indent=2))
+
+with open(state_file + '.new', 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\n')
+" "$STATE_FILE" "$task_id") || {
+      rm -f "${STATE_FILE}.new"
+      log "ERROR: Task '$task_id' not found"
+      exit 2
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    log "Deleted task: $task_id"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+cmd_dequeue() {
+  ensure_state_file
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+max_concurrent = int(sys.argv[2])
+active_statuses = set(sys.argv[3].split())
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+state.setdefault('queue', [])
+tasks = state.get('tasks', {})
+
+active_count = sum(
+    1 for task in tasks.values()
+    if task.get('status') in active_statuses
+)
+available_slots = max(max_concurrent - active_count, 0)
+
+promoted = []
+now = datetime.now(timezone.utc).isoformat()
+
+while available_slots > 0 and state['queue']:
+    queued_task_id = state['queue'].pop(0)
+    queued_task = tasks.get(queued_task_id)
+    if not queued_task or queued_task.get('status') != 'queued':
+        continue
+
+    queued_task['status'] = 'created'
+    queued_task['updated_at'] = now
+    queued_task['phase_started_at'] = now
+    promoted.append(queued_task_id)
+    available_slots -= 1
+
+print(json.dumps({'promoted': promoted}, indent=2))
+
+with open(state_file + '.new', 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\\n')
+" "$STATE_FILE" "$MAX_CONCURRENT_TASKS" "$ACTIVE_STATUSES") || {
+      local py_exit=$?
+      rm -f "${STATE_FILE}.new"
+      exit "$py_exit"
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    log "Processed dequeue command"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+cmd_queue_status() {
+  ensure_state_file
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    python3 -c "
+import json, sys
+
+state_file = sys.argv[1]
+active_statuses = set(sys.argv[2].split())
+terminal_statuses = set(sys.argv[3].split())
+max_concurrent = int(sys.argv[4])
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+tasks = list(state.get('tasks', {}).values())
+
+active = sum(1 for task in tasks if task.get('status') in active_statuses)
+queued = sum(1 for task in tasks if task.get('status') == 'queued')
+completed = sum(1 for task in tasks if task.get('status') in terminal_statuses)
+total = len(tasks)
+available_slots = max(max_concurrent - active, 0)
+
+print(json.dumps({
+    'active': active,
+    'queued': queued,
+    'completed': completed,
+    'total': total,
+    'max_concurrent': max_concurrent,
+    'available_slots': available_slots,
+}, indent=2))
+" "$STATE_FILE" "$ACTIVE_STATUSES" "$TERMINAL_STATUSES" "$MAX_CONCURRENT_TASKS"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+
+# --- Set token usage ---
+cmd_set_tokens() {
+  if [ $# -lt 3 ]; then
+    log "Usage: task-manager.sh set-tokens <task-id> <input-tokens> <output-tokens> [cost-usd]"
+    exit 1
+  fi
+
+  local task_id="$1"
+  local input_tokens="$2"
+  local output_tokens="$3"
+  local cost_usd="${4:-0.0}"
+
+  validate_task_id "$task_id"
+  ensure_state_file
+
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+input_tokens = int(sys.argv[3])
+output_tokens = int(sys.argv[4])
+cost_usd = float(sys.argv[5])
+
+try:
+    with open(state_file, 'r') as f:
+        state = json.load(f)
+except (json.JSONDecodeError, ValueError) as e:
+    print(json.dumps({'error': f'Failed to parse state file: {e}'}), file=sys.stderr)
+    sys.exit(4)
+
+if task_id not in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} not found'}), file=sys.stderr)
+    sys.exit(2)
+
+task = state['tasks'][task_id]
+existing = task.get('token_usage', {'input': 0, 'output': 0, 'cost_usd': 0.0})
+task['token_usage'] = {
+    'input': existing.get('input', 0) + input_tokens,
+    'output': existing.get('output', 0) + output_tokens,
+    'cost_usd': existing.get('cost_usd', 0.0) + cost_usd
+}
+
+now = datetime.now(timezone.utc).isoformat()
+task['updated_at'] = now
+
+print(json.dumps(task, indent=2))
+
+with open(state_file + '.new', 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\n')
+" "$STATE_FILE" "$task_id" "$input_tokens" "$output_tokens" "$cost_usd") || {
+      rm -f "${STATE_FILE}.new"
+      exit $?
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    log "Updated token usage for task $task_id: input=$input_tokens, output=$output_tokens"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+# --- Session cleanup ---
+# Cleans up the OpenCode session for a task in terminal status.
+# Extracts last assistant message before deleting.
+cmd_cleanup() {
+  if [ $# -lt 1 ]; then
+    log "Usage: task-manager.sh cleanup <task-id>"
+    exit 1
+  fi
+
+  local task_id="$1"
+  validate_task_id "$task_id"
+
+  # Get task state
+  local task_json
+  task_json=$(cmd_get "$task_id") || exit $?
+
+  local session_id
+  session_id=$(echo "$task_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null)
+
+  local task_status
+  task_status=$(echo "$task_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+
+  if [ -z "$session_id" ] || [ "$session_id" = "null" ] || [ "$session_id" = "None" ]; then
+    log "Task '$task_id' has no session to clean up"
+    echo "$task_json"
+    return 0
+  fi
+
+  local opencode_url="${OPENCODE_URL:-http://127.0.0.1:4096}"
+
+  # Extract last assistant message before deletion
+  local last_output=""
+  last_output=$(curl -s --max-time 10 "${opencode_url}/session/${session_id}/message" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    msgs = json.load(sys.stdin)
+    # Find last message with text content
+    for m in reversed(msgs):
+        parts = m.get('parts', [])
+        for p in parts:
+            if p.get('type') == 'text':
+                text = p.get('text', '').strip()
+                if text and len(text) > 20:
+                    # Truncate to 2000 chars
+                    print(text[:2000])
+                    sys.exit(0)
+    print('')
+except:
+    print('')
+" 2>/dev/null) || true
+
+  # Delete the session
+  local delete_status
+  delete_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X DELETE "${opencode_url}/session/${session_id}" 2>/dev/null) || true
+
+  if [ "$delete_status" = "200" ] || [ "$delete_status" = "204" ]; then
+    log "Deleted OpenCode session $session_id for task $task_id"
+  elif [ "$delete_status" = "404" ]; then
+    log "Session $session_id already deleted (404)"
+  else
+    log "WARNING: Failed to delete session $session_id (HTTP $delete_status)"
+  fi
+
+  # Update task: clear session_id, store last output
+  (
+    flock -n 200 || { log "ERROR: Could not acquire state lock"; exit 4; }
+
+    local result
+    result=$(python3 -c "
+import json, sys, os
+state_file = sys.argv[1]
+task_id = sys.argv[2]
+last_output = sys.argv[3] if len(sys.argv) > 3 else ''
+
+with open(state_file) as f:
+    state = json.load(f)
+
+if task_id not in state.get('tasks', {}):
+    print(json.dumps({'error': f'Task {task_id} not found'}))
+    sys.exit(2)
+
+task = state['tasks'][task_id]
+task['session_id'] = None
+if last_output:
+    task['last_output'] = last_output[:2000]
+
+new_file = state_file + '.new'
+with open(new_file, 'w') as f:
+    json.dump(state, f, indent=2)
+    f.write('\n')
+
+print(json.dumps(task, indent=2))
+" "$STATE_FILE" "$task_id" "$last_output") || {
+      rm -f "${STATE_FILE}.new"
+      log "ERROR: Failed to update task '$task_id'"
+      exit 4
+    }
+
+    if [ -f "${STATE_FILE}.new" ]; then
+      mv "${STATE_FILE}.new" "$STATE_FILE"
+    fi
+
+    echo "$result"
+    log "Cleaned up session for task $task_id"
+  ) 200>"${STATE_DIR}/.tasks.lock"
+}
+
+# --- Cleanup all terminal tasks ---
+cmd_cleanup_all() {
+  local opencode_url="${OPENCODE_URL:-http://127.0.0.1:4096}"
+
+  # Clean up tasks in terminal statuses with active sessions
+  local cleaned=0
+  for status in completed failed aborted timed_out; do
+    local task_ids
+    task_ids=$(cmd_list --status "$status" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    tasks = json.load(sys.stdin)
+    if isinstance(tasks, list):
+        for t in tasks:
+            sid = t.get('session_id','')
+            if sid and sid != 'null' and sid != 'None':
+                print(t['id'])
+    elif isinstance(tasks, dict) and 'tasks' in tasks:
+        for t in tasks['tasks']:
+            sid = t.get('session_id','')
+            if sid and sid != 'null' and sid != 'None':
+                print(t['id'])
+except:
+    pass
+" 2>/dev/null) || true
+
+    for tid in $task_ids; do
+      cmd_cleanup "$tid" > /dev/null 2>&1 && cleaned=$((cleaned + 1))
+    done
+  done
+
+  log "Cleaned up $cleaned task session(s)"
+  echo "{\"cleaned\": $cleaned}"
+}
+
+# --- Main dispatch ---
+if [ $# -lt 1 ]; then
+  log "Usage: task-manager.sh <command> [args...]"
+  log "Commands: create, status, update, get, list, delete, dequeue, queue-status, set-tokens, cleanup, cleanup-all"
+  exit 1
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+  create)      cmd_create "$@" ;;
+  status)      cmd_status "$@" ;;
+  update)      cmd_update "$@" ;;
+  get)         cmd_get "$@" ;;
+  list)        cmd_list "$@" ;;
+  delete)      cmd_delete "$@" ;;
+  dequeue)     cmd_dequeue "$@" ;;
+  queue-status) cmd_queue_status "$@" ;;
+  cleanup)     cmd_cleanup "$@" ;;
+  cleanup-all) cmd_cleanup_all "$@" ;;
+  set-tokens)  cmd_set_tokens "$@" ;;
+  *)
+    log "ERROR: Unknown command '$COMMAND'. Valid: create, status, update, get, list, delete, dequeue, queue-status, cleanup, cleanup-all, set-tokens"
+    exit 1
+    ;;
+esac

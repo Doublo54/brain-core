@@ -1,0 +1,15 @@
+*.env
+*.key
+*.pem
+*.token
+.opencode-home/
+
+# Config backups with secrets (never commit)
+openclaw.json.backup
+*.backup
+
+# Plugin runtime data
+plugins/hindsight-retain/data/
+
+# OS
+.DS_Store

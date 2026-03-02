@@ -1,0 +1,268 @@
+# =============================================================================
+# OpenClaw Gateway Stack — Local Development
+#
+# This is a STANDALONE compose file for local development. It mirrors the
+# production Coolify compose but with dev-friendly additions:
+#   - Volume mounts for live editing (config, scripts, hooks)
+#   - Writable bind mount for brain repo (git-synced agent identities/knowledge)
+#   - Gateway port binds to 0.0.0.0 (accessible from host)
+#   - rag-network is created locally (not external)
+#   - Hindsight service with optional profile
+#   - env_file support for .env
+#
+# Usage:
+#   cp .env.example .env  # Fill in your values
+#   make up               # Start stack
+#   make logs             # Tail logs
+#   make down             # Stop stack
+#
+# To start with Hindsight:
+#   docker compose -f docker/docker-compose.dev.yml --profile hindsight up
+#
+# Build context: repo root (context: ..) so Dockerfile can COPY config/ and
+# scripts/ from outside docker/.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Docker Socket Proxy — filtered Docker API for sandbox management
+  # ---------------------------------------------------------------------------
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # Allowed endpoints (required for sandbox lifecycle)
+      CONTAINERS: 1
+      EXEC: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+      # Blocked endpoints (all default to 0, listed explicitly for audit)
+      VOLUMES: 0
+      SERVICES: 0
+      SWARM: 0
+      SECRETS: 0
+      NODES: 0
+      BUILD: 0
+      COMMIT: 0
+      AUTH: 0
+      PLUGINS: 0
+      SYSTEM: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - openclaw-internal
+
+  # ---------------------------------------------------------------------------
+  # Sandbox Image Builder — init container
+  #
+  # Builds the sandbox target from the shared Dockerfile and tags it as
+  # openclaw-sandbox:bookworm-slim. Runs once on deploy, then exits.
+  # The gateway depends_on this to ensure the image exists before starting.
+  #
+  # Dev note: Uses pull_policy: if_not_present for caching (don't rebuild
+  # every time). To force rebuild: docker compose build sandbox-builder
+  # ---------------------------------------------------------------------------
+  sandbox-builder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: sandbox
+      args:
+        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-v2026.2.15}
+    image: openclaw-sandbox:bookworm-slim
+    pull_policy: if_not_present
+    entrypoint: ["echo", "sandbox image ready"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Volume Init — one-shot volume ownership provisioning
+  # ---------------------------------------------------------------------------
+  volume-init:
+    image: busybox:1.36
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /home/node/.openclaw/workspace/agents /opt/opencode /home/node/.mcporter
+        chown -R 1000:1000 /home/node/.openclaw /opt/opencode /home/node/.mcporter
+        if [ -d /opt/brain ]; then
+          mkdir -p /opt/brain/agents/main /opt/brain/shared-skills
+          chown -R 1000:1000 /opt/brain 2>/dev/null || true
+        fi
+    volumes:
+      - 'openclaw_config:/home/node/.openclaw'
+      - 'opencode_workdir:/opt/opencode'
+      - 'openclaw_mcporter:/home/node/.mcporter'
+      - '${BRAIN_HOST_PATH:-../../brain}:/opt/brain'
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # OpenClaw Gateway
+  #
+  # Dev additions:
+  #   - Volume mounts for live editing (config, scripts, hooks)
+  #   - Port binds to 0.0.0.0 (accessible from host, not just loopback)
+  #   - env_file: ../.env for loading environment variables
+  # ---------------------------------------------------------------------------
+  openclaw:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: gateway
+      args:
+        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-v2026.2.15}
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      docker-proxy:
+        condition: service_started
+      sandbox-builder:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+    networks:
+      - openclaw-internal
+      - rag-network
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:${OPENCLAW_GATEWAY_PORT:-18789}"
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # --- Docker API (via socket proxy — host port since gateway uses host networking) ---
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      # --- Runtime ---
+      - HOME=/home/node
+      - TERM=xterm-256color
+      - NODE_ENV=production
+      - 'TZ=${TZ:-UTC}'
+      - OPENCLAW_DISABLE_BONJOUR=1
+      - 'OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}'
+      - OPENCLAW_GATEWAY_BIND=${OPENCLAW_GATEWAY_BIND:-lan}
+      - OPENCLAW_GATEWAY_PORT=${OPENCLAW_GATEWAY_PORT:-18789}
+      # --- Boot hooks (entrypoint runs scripts from this dir) ---
+      - OPENCLAW_HOOKS_DIR=/opt/hooks
+      - OPENCLAW_DOCTOR_INTERVAL=${OPENCLAW_DOCTOR_INTERVAL:-600}
+      # --- Config template (dev: use brain repo template if available) ---
+      - OPENCLAW_CONFIG_TEMPLATE=${OPENCLAW_CONFIG_TEMPLATE:-/opt/brain/config/openclaw.json.template}
+      # --- Config template variables (used by entrypoint on first boot) ---
+      - OPENCLAW_DEFAULT_MODEL=${OPENCLAW_DEFAULT_MODEL:-kimi-coding/k2p5}
+      - OPENCLAW_USER_TIMEZONE=${OPENCLAW_USER_TIMEZONE:-UTC}
+      - OPENCLAW_AGENT_NAME=${OPENCLAW_AGENT_NAME:-Agent}
+      - OPENCLAW_ADMIN_DISCORD_ID=${OPENCLAW_ADMIN_DISCORD_ID:-}
+      - OPENCLAW_ADMIN_TELEGRAM_ID=${OPENCLAW_ADMIN_TELEGRAM_ID:-}
+      # --- Provider API keys ---
+      - 'ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}'
+      - 'ANTHROPIC_OAUTH_TOKEN=${ANTHROPIC_OAUTH_TOKEN:-}'
+      - 'OPENAI_API_KEY=${OPENAI_API_KEY:-}'
+      - 'OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}'
+      - 'ZAI_API_KEY=${ZAI_API_KEY:-}'
+      - 'KIMI_API_KEY=${KIMI_API_KEY:-}'
+      # --- Channel tokens (DISCORD_BOT_TOKEN_* passed via env_file) ---
+      - 'DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}'
+      - 'TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}'
+      # --- Telegram User Plugin (MTProto personal account) ---
+      - 'TELEGRAM_API_ID=${TELEGRAM_API_ID:-}'
+      - 'TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}'
+      - 'TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION:-}'
+      # --- Discord User Plugin (DUB selfbot) ---
+      - 'DISCORD_USER_TOKEN=${DISCORD_USER_TOKEN:-}'
+      # --- External service tokens ---
+      - 'GITHUB_TOKEN=${GITHUB_TOKEN:-}'
+      - BRAIN_GIT_REPO=${BRAIN_GIT_REPO:-}
+      - BRAIN_GIT_BRANCH=${BRAIN_GIT_BRANCH:-main}
+      - BRAIN_LIVE_BRANCH=${BRAIN_LIVE_BRANCH:-live}
+      - 'CLICKUP_API_KEY=${CLICKUP_API_KEY:-}'
+      - 'BRAVE_API_KEY=${BRAVE_API_KEY:-}'
+      - 'AGENT_COLLAB_CHANNEL_ID=${AGENT_COLLAB_CHANNEL_ID:-}'
+      - 'GOOGLE_WORKSPACE_CLIENT_ID=${GOOGLE_WORKSPACE_CLIENT_ID:-}'
+      - 'GOOGLE_WORKSPACE_CLIENT_SECRET=${GOOGLE_WORKSPACE_CLIENT_SECRET:-}'
+      - 'GOOGLE_WORKSPACE_EMAIL=${GOOGLE_WORKSPACE_EMAIL:-}'
+      - WORKSPACE_MCP_CREDENTIALS_DIR=/home/node/.google_workspace_mcp/credentials
+      # --- OpenCode ---
+      - OPENCODE_SERVER_PORT=${OPENCODE_SERVER_PORT:-4096}
+      - 'OPENCODE_API_KEY=${OPENCODE_API_KEY:-}'
+      # --- Hindsight ---
+      - 'HINDSIGHT_URL=http://hindsight:8888'
+      # --- PATH (CLIs are baked into the image) ---
+      - PATH=/home/node/.local/bin:/opt/mise/shims:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      # Named volumes — Docker-managed, writable, persistent across deploys
+      - 'openclaw_config:/home/node/.openclaw'
+      - 'opencode_workdir:/opt/opencode'
+      - 'openclaw_mcporter:/home/node/.mcporter'
+      - '${GOOGLE_WORKSPACE_CREDS_PATH:-~/.google_workspace_mcp/credentials}:/home/node/.google_workspace_mcp/credentials:ro'
+      # Dev: Live editing mounts (read-only to prevent accidental modification)
+      - '../docker/entrypoint.sh:/entrypoint.sh:ro'
+      - '../config:/opt/config:ro'
+      - '../scripts:/opt/scripts:ro'
+      - '../scripts/hooks:/opt/hooks:ro'
+      # Plugins: writable so entrypoint can npm-install missing dependencies
+      - '../plugins/telegramuser:/home/node/.openclaw/extensions/telegramuser'
+      - '../plugins/discorduser:/home/node/.openclaw/extensions/discorduser'
+      - '../plugins/hindsight-retain:/home/node/.openclaw/extensions/hindsight-retain'
+      # Dev: Agent brain repo — writable bind mount for git-synced identities/knowledge
+      - '${BRAIN_HOST_PATH:-../../brain}:/opt/brain'
+      # Dev: Mirror mount at host path — gateway config uses BRAIN_HOST_PATH for
+      # agent workspaces (needed for sandbox bind-mounts from host). This mount
+      # lets the gateway also access those paths from inside the container.
+      - '${BRAIN_HOST_PATH:-../../brain}:${BRAIN_HOST_PATH:-/opt/brain-host}'
+      # Media-allowed mirror — sandbox agents create files in their workspace;
+      # the gateway message tool only allows sending media from ~/.openclaw/media/.
+      # This mount makes workspace files accessible under an allowed root so
+      # agents can attach files they create to Discord/Telegram messages.
+      - '${BRAIN_HOST_PATH:-../../brain}:/home/node/.openclaw/media/brain'
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - '-q'
+        - '--spider'
+        - 'http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/health'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # ---------------------------------------------------------------------------
+  # Hindsight — Optional memory service (start with --profile hindsight)
+  #
+  # Usage:
+  #   docker compose -f docker/docker-compose.dev.yml --profile hindsight up
+  # ---------------------------------------------------------------------------
+  hindsight:
+    image: ${HINDSIGHT_IMAGE:-hindsight:latest}
+    restart: unless-stopped
+    profiles:
+      - hindsight
+    ports:
+      - '8888:8888'
+    networks:
+      - rag-network
+
+volumes:
+  openclaw_config:
+  opencode_workdir:
+  openclaw_mcporter:
+
+networks:
+  # Dev: rag-network is created locally (not external like in production)
+  rag-network:
+    name: rag-network
+    driver: bridge
+  openclaw-internal:
+    driver: bridge

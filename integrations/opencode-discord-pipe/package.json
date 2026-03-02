@@ -1,0 +1,17 @@
+{
+  "name": "opencode-discord-pipe",
+  "version": "2.2.0",
+  "private": true,
+  "description": "SSE pipe from OpenCode server to Discord channels",
+  "type": "module",
+  "scripts": {
+    "start": "tsx pipe.ts",
+    "daemon": "bash daemon.sh start"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "tsx": "^4.21.0"
+  }
+}

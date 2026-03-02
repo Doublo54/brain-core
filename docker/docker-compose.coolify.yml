@@ -1,0 +1,252 @@
+# =============================================================================
+# OpenClaw Gateway Stack — Coolify Deployment
+#
+# Services:
+#   openclaw        — Gateway (main process)
+#   docker-proxy    — Docker Socket Proxy (sandbox Docker API access)
+#   sandbox-builder — Init container (builds + tags sandbox image, then exits)
+#   volume-init  — Init container (volume ownership provisioning)
+#
+# Networks:
+#   rag-network        — External; connects gateway + sandboxes to Hindsight
+#   openclaw-internal  — Internal; gateway to docker-proxy only (no egress)
+#
+# Build context: repo root (context: ..) so Dockerfile can COPY config/ and
+# scripts/ from outside docker/. Coolify Base Directory should be /docker.
+#
+# Volume host paths for DooD sandbox bind mapping:
+#   IMPORTANT: Coolify prepends its resource UUID to volume names.
+#   Actual volume name = <COOLIFY_UUID>_openclaw-config (NOT openclaw_config).
+#   Host path = /var/lib/docker/volumes/<COOLIFY_UUID>_openclaw-config/_data
+#   See docs/dood-path-mapping.md for full details.
+#
+# Coolify env vars (auto-detected in UI):
+#   OPENCLAW_VERSION            — OpenClaw version to build (default: v2026.2.15)
+#   OPENCLAW_GATEWAY_TOKEN      — Gateway auth token (required)
+#   OPENCLAW_GATEWAY_HOST_BIND  — Host bind address (default: 127.0.0.1)
+#   OPENCLAW_GATEWAY_HOST_PORT  — Host port (default: 18789)
+#   OPENCLAW_GATEWAY_PORT       — Container port (default: 18789)
+#   OPENCLAW_DEFAULT_MODEL      — Default model (default: anthropic/claude-sonnet-4-5)
+#   OPENCLAW_AGENT_NAME         — Main agent display name (default: Agent)
+#   OPENCLAW_USER_TIMEZONE      — Timezone (default: UTC)
+#   BRAIN_HOST_PATH             — Host-absolute path to the brain workspace (required for sandbox)
+#   BRAIN_GIT_REPO              — GitHub repo for brain sync (e.g., "org/brain-repo")
+#   BRAIN_GIT_BRANCH            — Branch to track (default: main)
+#   OPENCLAW_ADMIN_DISCORD_ID   — Admin Discord user ID (optional)
+#   OPENCLAW_ADMIN_TELEGRAM_ID  — Admin Telegram user ID (optional)
+#   ANTHROPIC_API_KEY, ANTHROPIC_OAUTH_TOKEN, OPENAI_API_KEY, etc. — Provider API keys
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Docker Socket Proxy — filtered Docker API for sandbox management
+  #
+  # Only exposes endpoints needed for container lifecycle (create, start, stop,
+  # exec, inspect). Dangerous endpoints (Swarm, Secrets, Volumes, Build, etc.)
+  # are blocked. Sandbox containers cannot reach this proxy — they are spawned
+  # as DooD siblings on rag-network, not on openclaw-internal.
+  # See docs/security-model.md for full trust model.
+  # ---------------------------------------------------------------------------
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # Allowed endpoints (required for sandbox lifecycle)
+      CONTAINERS: 1
+      EXEC: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+      # Blocked endpoints (all default to 0, listed explicitly for audit)
+      VOLUMES: 0
+      SERVICES: 0
+      SWARM: 0
+      SECRETS: 0
+      NODES: 0
+      BUILD: 0
+      COMMIT: 0
+      AUTH: 0
+      PLUGINS: 0
+      SYSTEM: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - openclaw-internal
+
+  # ---------------------------------------------------------------------------
+  # Sandbox Image Builder — init container
+  #
+  # Builds the sandbox target from the shared Dockerfile and tags it as
+  # openclaw-sandbox:bookworm-slim. Runs once on deploy, then exits.
+  # The gateway depends_on this to ensure the image exists before starting.
+  # ---------------------------------------------------------------------------
+  sandbox-builder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: sandbox
+      args:
+        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-v2026.2.15}
+    image: openclaw-sandbox:bookworm-slim
+    entrypoint: ["echo", "sandbox image ready"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Volume Init — one-shot volume ownership provisioning
+  #
+  # Ensures named volumes are writable by uid/gid 1000 (node user in gateway and
+  # sandbox images). This avoids per-host manual chown and keeps deployments
+  # reproducible across environments.
+  # ---------------------------------------------------------------------------
+  volume-init:
+    image: busybox:1.36
+    user: "0:0"
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        mkdir -p /home/node/.openclaw/workspace/agents /opt/opencode /home/node/.mcporter
+        chown -R 1000:1000 /home/node/.openclaw /opt/opencode /home/node/.mcporter
+        if [ -d /opt/brain ]; then
+          mkdir -p /opt/brain/agents/main /opt/brain/shared-skills
+          chown -R 1000:1000 /opt/brain 2>/dev/null || true
+        fi
+    volumes:
+      - 'openclaw_config:/home/node/.openclaw'
+      - 'opencode_workdir:/opt/opencode'
+      - 'openclaw_mcporter:/home/node/.mcporter'
+      - 'openclaw_brain:/opt/brain'
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+   # OpenClaw Gateway
+  # ---------------------------------------------------------------------------
+  openclaw:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: gateway
+      args:
+        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-v2026.2.15}
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      docker-proxy:
+        condition: service_started
+      sandbox-builder:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+    networks:
+      - openclaw-internal
+      - rag-network
+    ports:
+      - "${OPENCLAW_GATEWAY_HOST_BIND:-127.0.0.1}:${OPENCLAW_GATEWAY_HOST_PORT:-18789}:18789"
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      # --- Docker API (via socket proxy — host port since gateway uses host networking) ---
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      # --- Runtime ---
+      - HOME=/home/node
+      - TERM=xterm-256color
+      - NODE_ENV=production
+      - 'TZ=${TZ:-UTC}'
+      - OPENCLAW_DISABLE_BONJOUR=1
+      - 'OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}'
+      - OPENCLAW_GATEWAY_BIND=${OPENCLAW_GATEWAY_BIND:-lan}
+      - OPENCLAW_GATEWAY_PORT=${OPENCLAW_GATEWAY_PORT:-18789}
+      - OPENCLAW_HOOKS_DIR=/opt/hooks
+      - OPENCLAW_DOCTOR_INTERVAL=${OPENCLAW_DOCTOR_INTERVAL:-300}
+      - OPENCLAW_CONFIG_TEMPLATE=${OPENCLAW_CONFIG_TEMPLATE:-/opt/brain/config/openclaw.json.template}
+      # --- Config template variables (used by entrypoint on first boot) ---
+      - OPENCLAW_DEFAULT_MODEL=${OPENCLAW_DEFAULT_MODEL:-kimi-coding/k2p5}
+      - OPENCLAW_USER_TIMEZONE=${OPENCLAW_USER_TIMEZONE:-UTC}
+      - OPENCLAW_AGENT_NAME=${OPENCLAW_AGENT_NAME:-Agent}
+      - BRAIN_HOST_PATH=${BRAIN_HOST_PATH:-}
+      - OPENCLAW_ADMIN_DISCORD_ID=${OPENCLAW_ADMIN_DISCORD_ID:-}
+      - OPENCLAW_ADMIN_TELEGRAM_ID=${OPENCLAW_ADMIN_TELEGRAM_ID:-}
+      # --- Provider API keys ---
+      - 'ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}'
+      - 'ANTHROPIC_OAUTH_TOKEN=${ANTHROPIC_OAUTH_TOKEN:-}'
+      - 'OPENAI_API_KEY=${OPENAI_API_KEY:-}'
+      - 'OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}'
+      - 'ZAI_API_KEY=${ZAI_API_KEY:-}'
+      - 'KIMI_API_KEY=${KIMI_API_KEY:-}'
+      # --- Channel tokens (DISCORD_BOT_TOKEN_* set via Coolify dashboard) ---
+      - 'DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}'
+      - 'TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}'
+      # --- Telegram User Plugin (MTProto personal account) ---
+      - 'TELEGRAM_API_ID=${TELEGRAM_API_ID:-}'
+      - 'TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}'
+      - 'TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION:-}'
+      # --- Discord User Plugin (DUB selfbot) ---
+      - 'DISCORD_USER_TOKEN=${DISCORD_USER_TOKEN:-}'
+      # --- External service tokens ---
+      - 'GITHUB_TOKEN=${GITHUB_TOKEN:-}'
+      - BRAIN_GIT_REPO=${BRAIN_GIT_REPO:-}
+      - BRAIN_GIT_BRANCH=${BRAIN_GIT_BRANCH:-main}
+      - BRAIN_LIVE_BRANCH=${BRAIN_LIVE_BRANCH:-live}
+      - 'CLICKUP_API_KEY=${CLICKUP_API_KEY:-}'
+      - 'BRAVE_API_KEY=${BRAVE_API_KEY:-}'
+      # --- OpenCode ---
+      - OPENCODE_SERVER_PORT=${OPENCODE_SERVER_PORT:-4096}
+      - 'OPENCODE_API_KEY=${OPENCODE_API_KEY:-}'
+      # --- Hindsight ---
+      - 'HINDSIGHT_URL=http://hindsight:8888'
+      # --- PATH (CLIs are baked into the image) ---
+      - PATH=/home/node/.local/bin:/opt/mise/shims:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      # Named volumes — Docker-managed, writable, persistent across deploys.
+      #
+      # DooD sandbox path mapping:
+      #   Coolify prepends its resource UUID to volume names, so the actual
+      #   host paths are:
+      #     ~/.openclaw  → /var/lib/docker/volumes/<UUID>_openclaw-config/_data
+      #     opencode     → /var/lib/docker/volumes/<UUID>_opencode-workdir/_data
+      #     brain        → /var/lib/docker/volumes/<UUID>_openclaw-brain/_data
+      #   See docs/dood-path-mapping.md for how to find your UUID and set
+      #   BRAIN_HOST_PATH correctly.
+      - 'openclaw_config:/home/node/.openclaw'
+      - 'opencode_workdir:/opt/opencode'
+      - 'openclaw_mcporter:/home/node/.mcporter'
+      - 'openclaw_brain:/opt/brain'
+      - 'openclaw_brain:/home/node/.openclaw/media/brain'
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - '-q'
+        - '--spider'
+        - 'http://localhost:${OPENCLAW_GATEWAY_PORT:-18789}/health'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  openclaw_config:
+    name: openclaw_config
+  opencode_workdir:
+    name: opencode_workdir
+  openclaw_mcporter:
+    name: openclaw_mcporter
+  openclaw_brain:
+    name: openclaw_brain
+
+networks:
+  rag-network:
+    external: true
+  openclaw-internal:
+    driver: bridge
+    internal: true

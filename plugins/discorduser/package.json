@@ -1,0 +1,16 @@
+{
+  "name": "@openclaw/discorduser",
+  "version": "2026.2.6",
+  "description": "OpenClaw Discord channel plugin",
+  "type": "module",
+  "dependencies": {
+    "discord-user-bots": "^2.0.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {},
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

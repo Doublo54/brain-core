@@ -1,0 +1,33 @@
+# brain.yaml.defaults — chief-of-staff Template Defaults
+# Merged with base template during create-agent.
+# Values here override base template defaults.
+
+template_version: "1.0"
+
+role: "chief-of-staff"
+tier: "standard"
+
+agent:
+  creature: ""    # Override during agent creation
+  emoji: ""       # Override during agent creation
+
+memory:
+  backend: "hindsight"
+
+openclaw:
+  sandbox:
+    mode: "all"
+  tools:
+    deny: []    # Role-specific denials
+
+skills:
+  - memory-brain
+  - proactive-agent-behavior
+  - presentations
+
+mcp_servers:
+  - hindsight
+
+# Role-specific access
+scope: "agent"
+workspaceAccess: "rw"

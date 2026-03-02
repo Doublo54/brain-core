@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate-compose:
+    name: Validate Compose Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate production compose
+        run: docker compose -f docker/docker-compose.coolify.yml config --quiet
+
+      - name: Validate dev compose
+        run: docker compose -f docker/docker-compose.dev.yml config --quiet
+
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64]
+        target: [gateway, sandbox]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.target }} for ${{ matrix.platform }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  validate-scripts:
+    name: Validate Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check entrypoint.sh syntax
+        run: sh -n docker/entrypoint.sh
+
+      - name: Check bootstrap-opencode.sh syntax
+        run: bash -n scripts/bootstrap-opencode.sh
+
+  check-genericization:
+    name: Check Template Genericization
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify no business-specific references
+        run: |
+          # Check for business-specific references (excluding allowed OSS deps and architecture docs)
+          if grep -rn "GregAIlia\|Defizoo\|defizoo\|apeguru\|vaultedge\|GITHUB_TOKEN_carpincho\|agentId=carpincho\|carpincho\|chainpilot" \
+            --include='*.yaml' --include='*.yml' \
+            --include='*.json' --include='*.sh' --include='*.ts' \
+            --exclude='validate-permissions.sh' \
+            --exclude-dir=brains-old --exclude-dir=.git --exclude-dir=.sisyphus --exclude-dir=.github --exclude-dir=node_modules . 2>/dev/null; then
+            echo "ERROR: Business-specific references found in generic template"
+            exit 1
+          fi
+          # Check markdown files but exclude architecture documentation
+          if grep -rn "GregAIlia\|Defizoo\|defizoo\|apeguru\|vaultedge\|GITHUB_TOKEN_carpincho\|agentId=carpincho\|carpincho\|chainpilot" \
+            --include='*.md' \
+            --exclude-dir=brains-old --exclude-dir=.git --exclude-dir=.sisyphus --exclude-dir=node_modules \
+            template/ skills/ integrations/ README.md 2>/dev/null; then
+            echo "ERROR: Business-specific references found in template/skills/integrations"
+            exit 1
+          fi
+          if grep -rn "Carpintechno/brain[^-]" \
+            --exclude-dir=brains-old --exclude-dir=.git --exclude-dir=.sisyphus --exclude-dir=.github --exclude-dir=node_modules \
+            template/ skills/ integrations/ scripts/ config/ README.md 2>/dev/null; then
+            echo "ERROR: Personal repo reference found (Carpintechno/brain)"
+            exit 1
+          fi
+          echo "✓ No business-specific references found"
+
+      - name: Verify functional dependency preserved
+        run: |
+          if ! grep -r "Carpintechno/openclaw-hindsight-retain" . 2>/dev/null; then
+            echo "ERROR: Hindsight plugin reference missing (functional dependency)"
+            exit 1
+          fi
+          echo "✓ Hindsight plugin reference preserved"
+
+  test-unit:
+    name: Unit Tests (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest
+        run: npm test
+
+  test-bats:
+    name: BATS Shell Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install BATS and dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bats jq
+
+      - name: Run BATS tests
+        run: bats scripts/orchestration/tests/*.bats
+
+  validate-permissions:
+    name: Validate Sandbox Permissions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout brain-core
+        uses: actions/checkout@v4
+        with:
+          path: brain-core
+
+      - name: Checkout defizoo-brain
+        id: brain-checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository_owner }}/defizoo-brain
+          path: defizoo-brain
+          token: ${{ secrets.BRAIN_REPO_TOKEN }}
+
+      - name: Validate sandbox/approval configuration
+        if: steps.brain-checkout.outcome == 'success'
+        run: bash brain-core/scripts/validate-permissions.sh --config defizoo-brain/config/openclaw.json.template --brain-dir defizoo-brain/agents
+
+      - name: Skip sandbox validation notice
+        if: steps.brain-checkout.outcome != 'success'
+        run: |
+          echo "WARNING: Skipping sandbox validation because defizoo-brain checkout failed."
+          echo "Configure BRAIN_REPO_TOKEN with read access to Defizoo/defizoo-brain to enforce this gate."
+
+  check-secrets:
+    name: Check for Secrets in Tracked Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for leaked secrets
+        run: |
+          # Check for common secret patterns in tracked files
+          # Exclude .env files, examples, and documentation
+          if git grep -l 'sk-[a-zA-Z0-9]\{20,\}\|ghp_[a-zA-Z0-9]\{36\}\|xoxb-[a-zA-Z0-9-]\{50,\}\|AKIA[A-Z0-9]\{16\}' \
+            -- ':!*.example' ':!*.env*' ':!docs/credential-rotation*' ':!.sisyphus/' 2>/dev/null; then
+            echo "ERROR: Potential secrets found in tracked files"
+            exit 1
+          fi
+          echo "✓ No secrets found in tracked files"

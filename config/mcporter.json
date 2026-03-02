@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "hindsight": {
+      "baseUrl": "http://hindsight:8888/mcp/"
+    },
+    "zai-vision": {
+      "command": "npx",
+      "args": ["-y", "@z_ai/mcp-server"],
+      "env": {
+        "Z_AI_API_KEY": "${ZAI_API_KEY}",
+        "Z_AI_MODE": "ZAI"
+      }
+    },
+    "web-reader": {
+      "baseUrl": "https://api.z.ai/api/mcp/web_reader/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ZAI_API_KEY}"
+      }
+    },
+    "zread": {
+      "baseUrl": "https://api.z.ai/api/mcp/zread/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ZAI_API_KEY}"
+      }
+    },
+    "clickup": {
+      "command": "npx",
+      "args": ["-y", "@chykalophia/clickup-mcp-server"],
+      "env": {
+        "CLICKUP_API_TOKEN": "${CLICKUP_API_KEY}"
+      }
+    },
+    "google-workspace": {
+      "command": "uvx",
+      "args": ["workspace-mcp", "--single-user", "--tool-tier", "complete"],
+      "env": {
+        "GOOGLE_OAUTH_CLIENT_ID": "${GOOGLE_WORKSPACE_CLIENT_ID}",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "${GOOGLE_WORKSPACE_CLIENT_SECRET}",
+        "USER_GOOGLE_EMAIL": "${GOOGLE_WORKSPACE_EMAIL}"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.68", "--headless", "--no-sandbox", "--browser", "chromium"],
+      "env": {}
+    }
+  },
+  "imports": []
+}

@@ -1,0 +1,9 @@
+{
+  "id": "telegramuser",
+  "channels": ["telegramuser"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -1,0 +1,28 @@
+# Secrets and credentials
+.env
+*.env
+*.key
+*.pem
+*.token
+.env.*
+
+# Config backups with secrets
+openclaw.json.backup
+*.backup
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Agent runtime (never committed)
+.opencode-home/
+agents/*/.npm/
+agents/*/.zai/
+brains-old/

@@ -1,0 +1,31 @@
+# brain.yaml.defaults — coding Template Defaults
+# Merged with base template during create-agent.
+# Values here override base template defaults.
+
+template_version: "1.0"
+
+role: "coding"
+tier: "trusted"
+
+agent:
+  creature: ""    # Override during agent creation
+  emoji: ""       # Override during agent creation
+
+memory:
+  backend: "hindsight"
+
+openclaw:
+  sandbox:
+    mode: "off"
+  tools:
+    deny: []    # Role-specific denials
+
+skills:
+  - memory-brain
+  - proactive-agent-behavior
+  - coding-orchestrator
+  - code-review-orchestrator
+  - skill-developer
+
+mcp_servers:
+  - hindsight

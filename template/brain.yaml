@@ -1,0 +1,103 @@
+# brain.yaml — Agent Brain Configuration
+#
+# This file defines variables used throughout the template.
+# Fill it in manually or use the bootstrap skill (bootstrap/SKILL.md)
+# to walk through setup interactively.
+#
+# After substitution, this file becomes a read-only record of the
+# agent's configuration. Do not delete it.
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+
+deployment:
+  mode: "standalone"          # "standalone" (own repo) | "subfolder" (within existing brain repo)
+  parent_repo: ""             # Subfolder only. Path to parent brain repo root
+  subfolder_path: ""          # Subfolder only. Path within parent (e.g., "agents/your-agent")
+
+# ── Agent Identity ────────────────────────────────────────────────────────────
+
+agent:
+  name: ""                    # Required. Display name (e.g., "Atlas", "Sage")
+  id: ""                      # Required. Slug ID used in configs (e.g., "atlas", "your-agent")
+  branch: ""                  # Auto-derived during bootstrap: "{id}-live"
+  creature: ""                # Optional. Character/persona description
+  emoji: ""                   # Optional. Agent emoji(s)
+
+# ── Owner ─────────────────────────────────────────────────────────────────────
+
+owner:
+  name: ""                    # Required. Primary user name (e.g., "your-username")
+  timezone: "UTC"             # Timezone (e.g., "America/Sao_Paulo")
+  discord_id: ""              # Optional. Discord user ID
+  telegram_id: ""             # Optional. Telegram user ID
+
+# ── Platform ──────────────────────────────────────────────────────────────────
+
+platform:
+  type: "generic"             # "openclaw" | "cursor" | "generic"
+  workspace_path: ""          # OpenClaw only. Agent workspace path
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+
+model:
+  default: "kimi-coding/k2p5" # Default model for agent turns
+  aliases: {}                 # Model aliases (e.g., { "opus": "anthropic/claude-opus-4-6" })
+  # Example aliases:
+  #   opus: "anthropic/claude-opus-4-6"
+  #   sonnet: "anthropic/claude-sonnet-4-5"
+  #   k2: "kimi-coding/k2p5"
+
+# ── Memory ────────────────────────────────────────────────────────────────────
+
+memory:
+  backend: "builtin"          # "builtin" | "lancedb" | "qmd" | "hindsight"
+  bank_id: ""                 # Hindsight only. Auto-derived from agent.id if empty
+  hindsight_endpoint: ""      # Hindsight only. API URL (e.g., "http://hindsight:8888")
+  embedding_provider: ""      # Optional: "local" | "openai" | "gemini" | "voyage"
+
+# ── MCP Servers ───────────────────────────────────────────────────────────────
+# Selected during bootstrap. Empty by default — user picks which to enable.
+
+mcp_servers: []
+  # Available options presented during onboarding:
+  # - hindsight:   Semantic memory (retain/recall/reflect). Needs Hindsight service.
+  # - zai-vision:  Image/video analysis, OCR. Needs ZAI_API_KEY.
+  # - web-reader:  Structured web page extraction. Needs ZAI_API_KEY.
+  # - zread:       Research GitHub repos without cloning. Needs ZAI_API_KEY.
+  # - clickup:     Project management (tasks, docs, time). Needs CLICKUP_API_KEY.
+  # - Custom MCP servers can be added manually to config/mcporter.json
+
+# ── GitHub ────────────────────────────────────────────────────────────────────
+
+github:
+  user: ""                    # GitHub username
+  user_id: ""                 # GitHub user ID
+  repo: ""                    # Brain repo name (e.g., "brain")
+
+# ── Security ──────────────────────────────────────────────────────────────────
+
+security:
+  admin_id: ""                # Platform-specific admin identifier
+  admin_name: ""              # Admin display name
+
+# ── Multi-Agent ───────────────────────────────────────────────────────────────
+
+multi_agent:
+  enabled: false              # Set to true for agents/{id}/ subdirectory layout
+  agents: []                  # Additional agent IDs (first agent uses root-level files)
+
+# ── OpenClaw Advanced (filled by progressive config in bootstrap) ─────────────
+
+openclaw:
+  tools:
+    allow: []                 # Tool allowlist (empty = all allowed)
+    deny: []                  # Tool denylist
+  sandbox:
+    mode: "off"               # "off" | "non-main" | "all"
+  compaction:
+    reserve_tokens_floor: 20000
+  identity:
+    theme: ""                 # Short theme line (e.g., "space lobster assistant")
+  group_chat:
+    mention_patterns: []      # Patterns that trigger the agent in group chats
+  block_streaming: false      # Block streaming mode (send complete messages)

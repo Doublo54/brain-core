@@ -1,0 +1,11 @@
+{
+  "id": "discord-roles",
+  "name": "Discord Role Management",
+  "version": "1.0.1",
+  "description": "Create, edit, and manage Discord roles via agent tools.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

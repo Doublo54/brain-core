@@ -1,0 +1,32 @@
+# brain.yaml.defaults — marketing Template Defaults
+# Merged with base template during create-agent.
+# Values here override base template defaults.
+
+template_version: "1.0"
+
+role: "marketing"
+tier: "standard"
+
+agent:
+  creature: ""    # Override during agent creation
+  emoji: ""       # Override during agent creation
+
+memory:
+  backend: "hindsight"
+
+openclaw:
+  sandbox:
+    mode: "all"
+  tools:
+    deny: []    # Role-specific denials
+
+skills:
+  - memory-brain
+  - proactive-agent-behavior
+  - presentations
+
+mcp_servers:
+  - hindsight
+  - web-reader
+  - google-workspace
+  - zai-vision

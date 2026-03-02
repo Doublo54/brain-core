@@ -1,0 +1,19 @@
+{
+  "tier": "admin",
+  "description": "Full system access. Gateway-resident. For orchestrator agents that manage other agents.",
+  "sandbox": {
+    "mode": "off"
+  },
+  "tools": {
+    "allow": ["*"],
+    "deny": []
+  },
+  "knowledge_access": {
+    "commons_bank": "read-write",
+    "agent_bank": "read-write",
+    "shared_knowledge": "read-write"
+  },
+  "mcp_servers": ["hindsight", "zai-vision", "web-reader", "zread", "clickup", "playwright"],
+  "env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ZAI_API_KEY", "CLICKUP_API_KEY", "GITHUB_TOKEN"],
+  "example_agents": ["my-orchestrator (orchestrator)"]
+}

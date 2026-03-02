@@ -1,0 +1,24 @@
+# =============================================================================
+# Docker build context exclusions — brain-core
+#
+# Build context is repo root (compose uses context: ..).
+# Whitelist approach: ignore everything, re-include only build inputs.
+# =============================================================================
+
+# Ignore everything
+**
+
+# Include only what the Docker build needs
+!docker/Dockerfile
+!docker/entrypoint.sh
+!config/
+!config/**
+!scripts/
+!scripts/**
+!integrations/
+!integrations/**
+!skills/
+!skills/**
+!plugins/
+!plugins/**
+!.dockerignore

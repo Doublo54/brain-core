@@ -1,0 +1,188 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "${OPENCLAW_DEFAULT_MODEL}",
+        "fallbacks": [
+          "zai/glm-4.7",
+          "opencode/kimi-k2.5"
+        ]
+      },
+      "models": {
+        "kimi-coding/k2p5": { "alias": "k2" },
+        "zai/glm-4.7": { "alias": "glm" },
+        "opencode/kimi-k2.5": { "alias": "zen-k2" },
+        "opencode/claude-sonnet-4-5": { "alias": "osonnet" },
+        "opencode/claude-opus-4-6": { "alias": "oopus" },
+        "opencode/claude-opus-4-5": { "alias": "oopus45" },
+        "anthropic/claude-sonnet-4-5": { "alias": "sonnet" },
+        "anthropic/claude-opus-4-6": { "alias": "opus" },
+        "anthropic/claude-opus-4-5": { "alias": "opus45" }
+      },
+      "workspace": "/opt/brain/agents/main",
+      "userTimezone": "${OPENCLAW_USER_TIMEZONE}",
+      "memorySearch": {
+        "enabled": true,
+        "sources": ["memory"],
+        "extraPaths": [
+          "CONTEXT.md",
+          "PLAYBOOK.md",
+          "CONVENTIONS.md",
+          "SECURITY.md"
+        ],
+        "sync": {
+          "onSessionStart": true,
+          "onSearch": true,
+          "watch": true
+        },
+        "query": {
+          "maxResults": 8,
+          "minScore": 0.3
+        }
+      },
+      "contextPruning": {
+        "mode": "cache-ttl",
+        "ttl": "30m",
+        "keepLastAssistants": 5,
+        "minPrunableToolChars": 50000,
+        "softTrim": {
+          "maxChars": 4000,
+          "headChars": 1500,
+          "tailChars": 1500
+        },
+        "hardClear": {
+          "enabled": true
+        }
+      },
+      "compaction": {
+        "mode": "safeguard",
+        "reserveTokensFloor": 20000,
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 10000,
+          "prompt": "Flush session context to durable memory before compaction. Follow RETENTION.md naming rules if present. Retain important facts, append session summary to memory/YYYY-MM-DD.md, and update CONTEXT.md if active work changed. Reply NO_REPLY.",
+          "systemPrompt": "SESSION NEARING COMPACTION — You must preserve important context NOW before it's lost. If RETENTION.md exists in your workspace, follow its naming rules. Write to memory/YYYY-MM-DD.md (daily log), and update CONTEXT.md with current state. Be thorough but fast. Reply with NO_REPLY when done."
+        }
+      },
+      "elevatedDefault": "full",
+      "blockStreamingDefault": "on",
+      "blockStreamingChunk": {
+        "minChars": 800,
+        "maxChars": 1200,
+        "breakPreference": "paragraph"
+      },
+      "blockStreamingCoalesce": {
+        "minChars": 1500,
+        "idleMs": 1000
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "default": true,
+        "name": "${OPENCLAW_AGENT_NAME}",
+        "workspace": "/opt/brain/agents/main",
+        "sandbox": { "mode": "off" }
+      },
+      {
+        "id": "sandboxed",
+        "name": "${OPENCLAW_AGENT_NAME} (Sandboxed)",
+        "workspace": "${BRAIN_HOST_PATH}/agents/sandboxed",
+        "sandbox": {
+          "mode": "all",
+          "scope": "agent",
+          "workspaceAccess": "rw"
+        },
+        "tools": {
+          "deny": ["exec", "process"]
+        }
+      }
+    ]
+  },
+  "tools": {
+    "elevated": {
+      "enabled": false,
+      "allowFrom": {
+        "discord": ["${OPENCLAW_ADMIN_DISCORD_ID}"],
+        "telegram": ["${OPENCLAW_ADMIN_TELEGRAM_ID}"]
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "boot-md": { "enabled": true },
+        "command-logger": { "enabled": true },
+        "session-memory": { "enabled": true }
+      }
+    }
+  },
+  "channels": {
+    "discord": {
+      "groupPolicy": "allowlist",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["${OPENCLAW_ADMIN_DISCORD_ID}"]
+    },
+    "telegramuser": {
+      "enabled": true,
+      "apiId": "${TELEGRAM_API_ID}",
+      "apiHash": "${TELEGRAM_API_HASH}",
+      "stringSession": "${TELEGRAM_STRING_SESSION}",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["${OPENCLAW_ADMIN_TELEGRAM_ID}"],
+      "approval": {
+        "mode": "auto"
+      }
+    },
+    "discorduser": {
+      "enabled": false,
+      "token": "${DISCORD_USER_TOKEN}",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["${OPENCLAW_ADMIN_DISCORD_ID}"],
+      "approval": {
+        "mode": "auto"
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "trustedProxies": ["172.16.0.0/12"]
+  },
+  "skills": {
+    "install": {
+      "nodeManager": "pnpm"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "telegram": { "enabled": true },
+      "telegramuser": { "enabled": true },
+      "discorduser": { "enabled": true },
+      "discord": { "enabled": true },
+      "hindsight-retain": { "enabled": false }
+    }
+  }
+}

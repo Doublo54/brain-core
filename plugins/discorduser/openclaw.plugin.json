@@ -1,0 +1,9 @@
+{
+  "id": "discorduser",
+  "channels": ["discorduser"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

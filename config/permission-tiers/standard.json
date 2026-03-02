@@ -1,0 +1,22 @@
+{
+  "tier": "standard",
+  "description": "Sandboxed in Docker container. Scoped to agent workspace. For business agents that don't need system access.",
+  "sandbox": {
+    "mode": "all",
+    "scope": "agent",
+    "workspaceAccess": "rw"
+  },
+  "tools": {
+    "allow": ["*"],
+    "deny": ["exec", "process", "apply_patch", "browser", "cron", "docker"]
+  },
+  "knowledge_access": {
+    "commons_bank": "read",
+    "agent_bank": "read-write",
+    "shared_knowledge": "read"
+  },
+  "mcp_servers": ["hindsight", "zai-vision", "web-reader"],
+  "env_vars": ["ZAI_API_KEY"],
+  "binds": ["/path/to/knowledge/shared:/knowledge:ro"],
+  "example_agents": ["chief-of-staff-agent", "sales-agent", "finance-agent", "community-lead-agent", "marketing-agent"]
+}

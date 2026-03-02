@@ -1,0 +1,127 @@
+{
+  "id": "hindsight-retain",
+  "name": "Hindsight Memory",
+  "version": "1.4.0",
+  "description": "Auto-recall injects relevant Hindsight memories before agent turns (configurable: off, first-turn-only, every-N-turns). Auto-retain batches stale conversations and ingests them for fact extraction. Feedback loop prevention strips injected memories from retained content. File-based buffers survive crashes. Entity pre-tagging, scoped tags, metadata, and derived context improve extraction quality.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "autoRecall": {
+        "type": "boolean",
+        "description": "Legacy toggle — use recallMode instead. When recallMode is set, this is derived automatically."
+      },
+      "recallMode": {
+        "type": "string",
+        "enum": ["off", "first", "every-n"],
+        "description": "When to inject memories: 'off' = disabled, 'first' = first turn only, 'every-n' = every N turns (default: off)"
+      },
+      "recallEveryN": {
+        "type": "number",
+        "description": "For recallMode 'every-n': inject memories every N turns (default: 5)"
+      },
+      "recallMaxTokens": {
+        "type": "number",
+        "description": "Maximum tokens for recall results (default: 512)"
+      },
+      "recallMinPromptLength": {
+        "type": "number",
+        "description": "Minimum prompt length (after metadata stripping) to trigger recall (default: 10)"
+      },
+      "recallTimeoutMs": {
+        "type": "number",
+        "description": "Timeout for recall API call in milliseconds (default: 5000)"
+      },
+      "recallSkipPatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Patterns in prompt that skip recall entirely (default: [\"Read HEARTBEAT.md\"])"
+      },
+      "recallTypes": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Fact types to recall (world, experience, observation). Empty = include all (default: [])"
+      },
+      "recallSessionTypes": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Session types to auto-recall for (dm, group, main). Empty = all sessions (default: [])"
+      },
+      "recallDedup": {
+        "type": "boolean",
+        "description": "Skip memory injection if identical results to last turn for this session (default: true)"
+      },
+      "apiUrl": {
+        "type": "string",
+        "description": "Hindsight API base URL"
+      },
+      "bankId": {
+        "type": "string",
+        "description": "Hindsight memory bank ID"
+      },
+      "context": {
+        "type": "string",
+        "description": "Fallback context tag when session type/provider can't be derived (default: conversation)"
+      },
+      "assistantName": {
+        "type": "string",
+        "description": "Name label for assistant messages in transcript (default: Assistant)"
+      },
+      "staleAfterMs": {
+        "type": "number",
+        "description": "Milliseconds of inactivity before flushing a conversation (default: 3600000 = 1h)"
+      },
+      "checkIntervalMs": {
+        "type": "number",
+        "description": "How often to check for stale sessions in ms (default: 60000 = 1m)"
+      },
+      "rollingMessages": {
+        "type": "number",
+        "description": "Number of messages from previous batch to include as context overlap (default: 5)"
+      },
+      "minMessages": {
+        "type": "number",
+        "description": "Minimum buffered messages required to flush (default: 2)"
+      },
+      "skipRoles": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Roles to exclude from transcript (default: [tool, toolResult])"
+      },
+      "flushTriggerPatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Patterns in first user message that trigger immediate buffer flush (turn itself is not buffered)"
+      },
+       "requireProviders": {
+         "type": "array",
+         "items": { "type": "string" },
+         "description": "Only buffer from these channel providers (default: [discord, telegram])"
+       },
+       "agentIds": {
+         "type": "array",
+         "items": { "type": "string" },
+         "description": "Only process messages for these agent IDs. Empty array = all agents (default: [])"
+       },
+       "sessionTtlMs": {
+         "type": "number",
+         "description": "Purge inactive session entries after this duration in ms (default: 604800000 = 7d)"
+       }
+    }
+  },
+  "uiHints": {
+    "recallMode": { "label": "Recall Mode", "help": "off = disabled, first = session start only, every-n = periodic" },
+    "recallEveryN": { "label": "Recall Every N Turns", "placeholder": "5", "help": "Only used when recallMode is 'every-n'" },
+    "autoRecall": { "label": "Auto-Recall (legacy)", "help": "Use recallMode instead" },
+    "recallMaxTokens": { "label": "Recall Max Tokens", "placeholder": "512" },
+    "recallTimeoutMs": { "label": "Recall Timeout (ms)", "placeholder": "5000" },
+    "recallDedup": { "label": "Recall Dedup", "help": "Skip injection if same memories as last turn" },
+    "apiUrl": { "label": "Hindsight API URL", "placeholder": "http://hindsight:8888" },
+    "bankId": { "label": "Bank ID", "placeholder": "my-agent" },
+    "staleAfterMs": { "label": "Stale After (ms)", "placeholder": "3600000" },
+    "checkIntervalMs": { "label": "Check Interval (ms)", "placeholder": "60000" },
+    "rollingMessages": { "label": "Rolling Messages", "placeholder": "5" },
+    "minMessages": { "label": "Min Messages", "placeholder": "2" },
+    "agentIds": { "label": "Agent IDs", "help": "Only listed agents get auto-capture and auto-recall. Empty = all agents." }
+  }
+}

@@ -1,0 +1,33 @@
+# OpenClaw Gateway Configuration for Exec Approval
+#
+# This configuration enables human-in-the-loop approval for task execution.
+# When the agent calls gated-execute.sh, Gateway intercepts and holds the call
+# until a human approves via Discord.
+#
+# To apply: merge into your OpenClaw Gateway config file
+
+approvals:
+  exec:
+    enabled: true
+    mode: "targets"
+    # sessionFilter matches the script name in exec calls
+    # When any exec call contains "gated-execute", Gateway intercepts it
+    sessionFilter: ["gated-execute"]
+    targets:
+      - channel: "discord"
+        # Your orchestrator Discord channel ID
+        to: "1468748218920734803"
+
+# How it works:
+# 1. Agent calls: bash gated-execute.sh <task-id> <workspace> <session-id>
+# 2. Gateway detects "gated-execute" in the exec call
+# 3. Gateway posts to Discord: "Execution approval requested for task X"
+# 4. Human reviews and sends /approve or /deny in Discord
+# 5. Gateway releases (or blocks) the exec call
+# 6. Only after release does gated-execute.sh actually run
+
+# Security notes:
+# - Agent runs INSIDE container, Gateway runs OUTSIDE
+# - Agent can request execution but cannot bypass approval
+# - Each execution requires fresh approval (no replay attacks)
+# - Gateway logs all approval decisions for audit

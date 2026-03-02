@@ -1,0 +1,21 @@
+{
+  "tier": "restricted",
+  "description": "Maximum isolation. Session-scoped sandbox, read-only workspace. For untrusted or community agents.",
+  "sandbox": {
+    "mode": "all",
+    "scope": "session",
+    "workspaceAccess": "ro"
+  },
+  "tools": {
+    "allow": ["web-reader"],
+    "deny": ["exec", "process", "apply_patch", "browser", "cron", "docker", "git"]
+  },
+  "knowledge_access": {
+    "commons_bank": "read",
+    "agent_bank": "read",
+    "shared_knowledge": "none"
+  },
+  "mcp_servers": ["web-reader"],
+  "env_vars": [],
+  "example_agents": ["community-member (future)"]
+}

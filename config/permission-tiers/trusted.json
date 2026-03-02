@@ -1,0 +1,19 @@
+{
+  "tier": "trusted",
+  "description": "Gateway-resident with broad tool access. For coding agents that need exec, git, and Docker.",
+  "sandbox": {
+    "mode": "off"
+  },
+  "tools": {
+    "allow": ["exec", "docker", "git", "process", "apply_patch", "browser"],
+    "deny": []
+  },
+  "knowledge_access": {
+    "commons_bank": "read-write",
+    "agent_bank": "read-write",
+    "shared_knowledge": "read"
+  },
+  "mcp_servers": ["hindsight", "zai-vision", "web-reader", "zread", "clickup", "playwright"],
+  "env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ZAI_API_KEY", "CLICKUP_API_KEY", "GITHUB_TOKEN"],
+  "example_agents": ["coding-agent"]
+}

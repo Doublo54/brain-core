@@ -1,0 +1,35 @@
+# brain.yaml.defaults — orchestrator Template Defaults
+# Merged with base template during create-agent.
+# Values here override base template defaults.
+
+template_version: "1.0"
+
+role: "orchestrator"
+tier: "admin"
+
+agent:
+  creature: ""    # Override during agent creation
+  emoji: ""       # Override during agent creation
+
+model: "kimi-coding/k2p5"
+
+memory:
+  backend: "hindsight"
+
+openclaw:
+  sandbox:
+    mode: "off"
+  tools:
+    deny: []    # Role-specific denials
+
+skills:
+  - memory-brain
+  - proactive-agent-behavior
+  - create-agent
+  - manage-agent
+  - upgrade-agent
+  - presentations
+  - skill-developer
+
+mcp_servers:
+  - hindsight

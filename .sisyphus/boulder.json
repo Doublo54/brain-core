@@ -1,0 +1,17 @@
+{
+  "active_plan": null,
+  "completed_plans": [
+    {
+      "plan_name": "brain-core-v2",
+      "plan_path": "/Users/ignacioblitzer/Develop/apeguru/brain-core/.sisyphus/plans/brain-core-v2.md",
+      "started_at": "2026-02-13T21:38:45.916Z",
+      "completed_at": "2026-02-13T22:20:00.000Z",
+      "session_ids": [
+        "ses_3a7c2202dffe6e1PUucl4J8pfR"
+      ],
+      "tasks_completed": 14,
+      "tasks_total": 14,
+      "agent": "atlas"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+# brain.yaml.defaults — qa-engineer Template Defaults
+# Merged with base template during create-agent.
+# Values here override base template defaults.
+
+template_version: "1.0"
+
+role: "qa-engineer"
+tier: "trusted"
+
+agent:
+  creature: ""    # Override during agent creation
+  emoji: "🔍"       # Default for QA
+
+memory:
+  backend: "hindsight"
+
+openclaw:
+  sandbox:
+    mode: "off"
+  tools:
+    deny: []    # Role-specific denials
+
+skills:
+  - memory-brain
+  - proactive-agent-behavior
+  - qa-orchestrator # Placeholder for future skill
+  - skill-developer
+
+mcp_servers:
+  - hindsight
+  - playwright
+  - zai-vision
