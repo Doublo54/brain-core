@@ -222,9 +222,12 @@ COPY plugins/telegramuser/ /home/node/.openclaw/extensions/telegramuser/
 COPY plugins/discorduser/ /home/node/.openclaw/extensions/discorduser/
 COPY plugins/hindsight-retain/ /home/node/.openclaw/extensions/hindsight-retain/
 
-# Install plugin npm dependencies (hindsight-retain has no package.json)
-RUN cd /home/node/.openclaw/extensions/telegramuser && npm install --production && \
-    cd /home/node/.openclaw/extensions/discorduser && npm install --production
+# Install plugin npm dependencies (hindsight-retain has no package.json).
+# Strip devDependencies first — telegramuser uses pnpm workspace:* refs that npm rejects.
+RUN cd /home/node/.openclaw/extensions/telegramuser && \
+    jq 'del(.devDependencies)' package.json > package.tmp.json && mv package.tmp.json package.json && \
+    npm install --omit=dev && \
+    cd /home/node/.openclaw/extensions/discorduser && npm install --omit=dev
 
 # Create workspace mount points
 RUN mkdir -p /opt/opencode /opt/config /opt/scripts /opt/hooks /opt/integrations && \
