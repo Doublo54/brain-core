@@ -169,7 +169,10 @@
       "mode": "off",
       "resetOnExit": false
     },
-    "trustedProxies": ["172.16.0.0/12"]
+    "trustedProxies": ["172.16.0.0/12"],
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
   },
   "skills": {
     "install": {
